@@ -8,7 +8,9 @@ Mod Claude Code personnel :
 - **Quota** : jauges contexte, 5 h et semaine avec écart au rythme régulier, alertes par seuil, mode économie (sous-agents sur Sonnet, consigne de sobriété), `/quota` par univers.
 - **Interface** : bandeau au-dessus de la saisie (boutons Univers `u` et Blocages `b`), carte sous chaque action bloquée, ligne d'état.
 
-Limite connue : les règles git lisent tout le texte d'une commande shell, y compris un texte écrit par heredoc ; un fichier qui cite une commande interdite s'écrit avec l'outil d'écriture.
+Les règles git ignorent le corps des heredocs (un fichier écrit en ligne de commande peut citer une commande interdite) ; la ligne d'ouverture et ce qui suit le délimiteur de fin restent contrôlés. Le contrôle des noms du GEDCOM lit, lui, la commande entière.
+
+Limite connue : une commande interdite citée entre guillemets dans une autre commande (`echo "…"`) est encore prise pour une vraie commande.
 
 ## Installation
 

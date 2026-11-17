@@ -1,1 +1,1 @@
-{ "name": "roisin-garde-fous", "version": "0.2.0", "author": { "name": "Oscar Roisin" }, "description": "Thèmes par univers (Wavestone, Physio Ourcq, perso), garde-fous git et confidentialité, répartition des modèles.", "types": "./types/index.d.ts" }
+{ "name": "roisin-garde-fous", "version": "0.2.1", "author": { "name": "Oscar Roisin" }, "description": "Thèmes par univers (Wavestone, Physio Ourcq, perso), garde-fous git et confidentialité, répartition des modèles.", "types": "./types/index.d.ts" }
