@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Contexte, Fenetre, Interception, Jauges, Univers } from '../types'
+import type { Autorisation, Contexte, Fenetre, Interception, Jauges, Univers } from '../types'
 import { BLOQUANTS, THEMES } from './themes'
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,11 @@ const jauges = atom({ plugin: 'roisin-garde-fous', key: 'jauges' } as const, { e
 const alertes = atom({ plugin: 'roisin-garde-fous', key: 'alertes' } as const, [] as string[], { shape: 'alertes-1' })
 const dernierCout = atom({ plugin: 'roisin-garde-fous', key: 'dernierCout' } as const, -1)
 const ouvert = atom({ plugin: 'roisin-garde-fous', key: 'ouvert' } as const, false)
+/** Autorisation à usage unique de pousser vers une branche protégée, donnée par Oscar via /autoriser-push. */
+const autorisation = atom({ plugin: 'roisin-garde-fous', key: 'autorisation' } as const, null as Autorisation, {
+  shape: 'autorisation-1',
+})
+const AUTORISATION_MS = 10 * 60 * 1000
 
 // ---------------------------------------------------------------------------
 // Règles git (toutes les sessions)
@@ -61,9 +66,6 @@ const ouvert = atom({ plugin: 'roisin-garde-fous', key: 'ouvert' } as const, fal
 const SEG = "[^;&|\\n]*"
 const GIT_ADD_TOUT = new RegExp(`\\bgit\\b${SEG}\\badd\\b${SEG}(\\s-A\\b|\\s--all\\b|\\s\\.(?=\\s|$|;|&|\\|))`)
 const GIT_FORCE = new RegExp(`\\bgit\\b${SEG}\\bpush\\b${SEG}(\\s-f\\b|\\s--force(?![-\\w])|\\s\\+\\S)`)
-const GIT_PUSH_PROTEGE = new RegExp(
-  `\\bgit\\b${SEG}\\bpush\\b${SEG}\\s(?:\\S+:)?(?:refs/heads/)?(main|master|prod)(?=\\s|$|;|&|\\|)`,
-)
 const GH_MERGE = new RegExp(`\\bgh\\s+pr\\s+merge\\b|\\bgh\\s+api\\b${SEG}/merges?\\b`)
 const RM_RF = /\brm\s+(?:-[a-zA-Z]*(?:rf|fr)[a-zA-Z]*|-r\s+-f|-f\s+-r)\s+([^;&|\n]+)/
 const RM_AUTORISE = /(^|\/)(node_modules|dist|build|coverage|\.astro|\.vite|\.turbo|out)\/?$|^\/tmp\//
@@ -75,10 +77,6 @@ function regleGit(commande: string, univers: Univers | undefined): string | null
   if (GIT_FORCE.test(commande)) {
     return 'push forcé interdit sur une branche poussée.'
   }
-  const protege = GIT_PUSH_PROTEGE.exec(commande)
-  if (protege) {
-    return `push direct vers « ${protege[1]} » interdit : passer par une PR.`
-  }
   if (GH_MERGE.test(commande) && univers !== 'physio') {
     return 'fusion de PR réservée à Oscar.'
   }
@@ -87,6 +85,77 @@ function regleGit(commande: string, univers: Univers | undefined): string | null
     const cibles = (rm[1] ?? '').trim().split(/\s+/)
     if (cibles.some(c => !RM_AUTORISE.test(c.replace(/^["']|["']$/g, '')))) {
       return '« rm -rf » hors dossiers de build : supprimer à la main ou cibler précisément.'
+    }
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Push vers une branche protégée : explicite (main, HEAD:main, --all) ou
+// implicite (HEAD, @, ou aucune destination : la branche courante est poussée).
+// ---------------------------------------------------------------------------
+
+const PROTEGEES = ['main', 'master', 'prod']
+const GIT_PUSH = /\bgit\b([^;&|\n]*?)\bpush\b([^;&|\n]*)/g
+
+type Push = { explicite: string | null; implicite: boolean; dossier: string | null }
+
+function sansGuillemets(t: string): string {
+  return t.replace(/^["']|["']$/g, '')
+}
+
+/** Les push d'une commande shell, avec leur destination protégée explicite ou le besoin de lire la branche courante. */
+function analyserPushs(commande: string): Push[] {
+  const pushs: Push[] = []
+  for (const m of commande.matchAll(GIT_PUSH)) {
+    const avant = m[1] ?? ''
+    const tokens = (m[2] ?? '').trim().split(/\s+/).filter(Boolean)
+    let explicite: string | null = null
+    if (tokens.some(t => t === '--all' || t === '--mirror' || t === '--branches')) explicite = 'toutes les branches'
+    const refspecs = tokens.filter(t => !t.startsWith('-')).slice(1)
+    for (const r of refspecs) {
+      const destination = (r.includes(':') ? (r.split(':').pop() ?? '') : r).replace(/^\+/, '').replace(/^refs\/heads\//, '')
+      if (PROTEGEES.includes(destination)) explicite = destination
+    }
+    const implicite = explicite === null && (refspecs.length === 0 || refspecs.some(r => r === 'HEAD' || r === '@'))
+    // Dossier du dépôt : `git -C <dossier>`, sinon le dernier `cd <dossier>` avant le push.
+    const option = /-C\s+(\S+)/.exec(avant)
+    const cds = [...commande.slice(0, m.index).matchAll(/\bcd\s+([^\s;&|]+)/g)]
+    const dossier = option?.[1] ?? cds[cds.length - 1]?.[1] ?? null
+    pushs.push({ explicite, implicite, dossier: dossier && sansGuillemets(dossier) })
+  }
+  return pushs
+}
+
+/** Branche courante du dépôt qui contient `dossier` (ou le dossier de la session) ; null si indéterminable. */
+async function brancheCourante($: EngineInterface, dossier: string | null): Promise<string | null> {
+  const cwd = await $.session.cwd()
+  let d = dossier === null ? cwd : dossier.startsWith('/') ? dossier : `${cwd}/${dossier}`
+  for (let i = 0; i < 12 && d.length > 0; i++) {
+    let tete: string | null = null
+    if (await $.fs.exists(`${d}/.git/HEAD`)) {
+      tete = await $.fs.read(`${d}/.git/HEAD`)
+    } else if (await $.fs.exists(`${d}/.git`)) {
+      // Worktree : `.git` est un fichier « gitdir: <chemin> ».
+      const gitdir = /^gitdir:\s*(.+)$/m.exec(await $.fs.read(`${d}/.git`))?.[1]?.trim()
+      if (gitdir) tete = await $.fs.read(`${gitdir.startsWith('/') ? gitdir : `${d}/${gitdir}`}/HEAD`)
+    }
+    if (tete !== null) return /^ref: refs\/heads\/(.+)$/.exec(tete.trim())?.[1] ?? null
+    const parent = d.replace(/\/[^/]+\/?$/, '')
+    if (parent === d) break
+    d = parent
+  }
+  return null
+}
+
+/** La branche protégée qu'une commande pousserait, ou null. Fail closed : branche indéterminable = protégée. */
+async function pushProtege($: EngineInterface, commande: string): Promise<string | null> {
+  for (const p of analyserPushs(commande)) {
+    if (p.explicite !== null) return p.explicite
+    if (p.implicite) {
+      const branche = await brancheCourante($, p.dossier)
+      if (branche === null) return 'branche courante indéterminable'
+      if (PROTEGEES.includes(branche)) return branche
     }
   }
   return null
@@ -329,6 +398,10 @@ export const register: Register = on => {
     if (BLOQUANTS.length > 0) $.ui.toast(BLOQUANTS[0] ?? '')
     await $.command.register({ name: 'univers', description: 'Choisir le thème : wavestone, physio ou perso' })
     await $.command.register({ name: 'garde-fous', description: 'Lister les actions bloquées dans cette session' })
+    await $.command.register({
+      name: 'autoriser-push',
+      description: 'Autoriser une fois, pendant 10 min, un push vers main, master ou prod (à taper soi-même)',
+    })
     await $.command.register({ name: 'quota', description: 'Quota : fenêtres 5 h et 7 jours, rythme, consommation par univers' })
     await appliquer($, detecter(e.cwd))
     await mesurer($)
@@ -341,6 +414,16 @@ export const register: Register = on => {
     const ctx = (await read($, contexte)) ?? { repo: '', univers: choix }
     await appliquer($, { ...ctx, univers: choix })
     return { text: `Thème ${LIBELLE[choix]} appliqué.` }
+  })
+
+  // Seule une saisie de la personne (clavier ou application) vaut autorisation : ni le modèle, ni un autre agent.
+  on('command.run', { command: 'autoriser-push' }, async ($, e) => {
+    if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
+      return { text: 'Refusé : /autoriser-push ne vaut que tapé par Oscar.' }
+    }
+    const jusqua = (await $.clock.now()) + AUTORISATION_MS
+    await update($, autorisation, () => ({ jusqua }))
+    return { text: 'Un push vers main, master ou prod est autorisé une fois, pendant 10 minutes.' }
   })
 
   on('command.run', { command: 'garde-fous' }, async $ => {
@@ -389,6 +472,16 @@ export const register: Register = on => {
     if (e.tool === 'Bash') {
       const regle = regleGit(e.command, ctx?.univers)
       if (regle) return bloquer($, id, outil, regle)
+      const cible = await pushProtege($, e.command)
+      if (cible !== null) {
+        const auto = await read($, autorisation)
+        if (auto !== null && auto.jusqua > (await $.clock.now())) {
+          await update($, autorisation, () => null)
+          $.ui.toast(`Push vers « ${cible} » autorisé par Oscar (usage unique, consommé).`)
+        } else {
+          return bloquer($, id, outil, `push vers « ${cible} » interdit : passer par une PR, ou Oscar tape /autoriser-push.`)
+        }
+      }
     }
     if (/merge_pull_request/.test(outil) && ctx?.univers !== 'physio') {
       return bloquer($, id, outil, 'fusion de PR réservée à Oscar.')
