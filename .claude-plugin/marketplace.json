@@ -1,0 +1,5 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "Oscar Roisin" },
+  "plugins": [{ "name": "roisin-garde-fous", "source": "./" }]
+}
