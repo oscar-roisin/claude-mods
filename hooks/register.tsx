@@ -90,6 +90,18 @@ function regleGit(commande: string, univers: Univers | undefined): string | null
   return null
 }
 
+/**
+ * La commande sans le corps de ses heredocs : un texte écrit dans un fichier (README, message)
+ * n'est pas une commande. La ligne d'ouverture et ce qui suit le délimiteur de fin restent lus.
+ * Le contrôle des noms du GEDCOM, lui, lit la commande entière (un message de commit peut venir d'un heredoc).
+ */
+function sansHeredocs(commande: string): string {
+  return commande.replace(
+    /(<<-?[ \t]*(['"]?)([A-Za-z_][\w-]*)\2)([^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*(?=\n|$)/g,
+    '$1$4',
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Push vers une branche protégée : explicite (main, HEAD:main, --all) ou
 // implicite (HEAD, @, ou aucune destination : la branche courante est poussée).
@@ -470,9 +482,10 @@ export const register: Register = on => {
 
     // 1. Règles git
     if (e.tool === 'Bash') {
-      const regle = regleGit(e.command, ctx?.univers)
+      const commande = sansHeredocs(e.command)
+      const regle = regleGit(commande, ctx?.univers)
       if (regle) return bloquer($, id, outil, regle)
-      const cible = await pushProtege($, e.command)
+      const cible = await pushProtege($, commande)
       if (cible !== null) {
         const auto = await read($, autorisation)
         if (auto !== null && auto.jusqua > (await $.clock.now())) {
