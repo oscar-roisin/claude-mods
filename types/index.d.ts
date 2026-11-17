@@ -15,6 +15,9 @@ export type Jauges = {
   economie: boolean
 }
 
+/** Autorisation à usage unique, valable jusqu'à `jusqua` (ms). */
+export type Autorisation = { jusqua: number } | null
+
 declare module 'claude-code' {
   interface PluginState {
     'roisin-garde-fous': {
@@ -24,6 +27,7 @@ declare module 'claude-code' {
       alertes: Shaped<string[]>
       dernierCout: number
       ouvert: boolean
+      autorisation: Shaped<Autorisation>
     }
   }
 }
